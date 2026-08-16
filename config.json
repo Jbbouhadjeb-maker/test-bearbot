@@ -1,0 +1,56 @@
+{
+  "1463429339910635522": {
+    "startDate": "2026-06-28",
+    "channelId": "1463429340644511798",
+    "mentionRole": null,
+    "timezone": "UTC",
+    "events": [
+      {
+        "id": "1e23c145-89b5-440f-919a-e7853f794c07",
+        "name": "Bear 1",
+        "emoji": "🐻",
+        "type": "interval",
+        "time": "12:00",
+        "lead": 10,
+        "intervalHours": 48,
+        "days": [],
+        "date": null,
+        "enabled": true
+      },
+      {
+        "id": "a2128cf8-a163-4452-a2b0-7e3dd2cb4a13",
+        "name": "Alliance Champ",
+        "emoji": "🛡️",
+        "type": "daily",
+        "time": "17:29",
+        "lead": 0,
+        "intervalHours": 48,
+        "days": [],
+        "date": null,
+        "message": null,
+        "enabled": true
+      }
+    ]
+  },
+  "993047268783558690": {
+    "startDate": "2026-06-29",
+    "channelId": "1093923430455312385",
+    "mentionRole": null,
+    "timezone": "UTC",
+    "events": [
+      {
+        "id": "a2c344ca-86b1-4310-ab73-d5229a49db4a",
+        "name": "Bear trap 1",
+        "emoji": "🐻",
+        "type": "interval",
+        "time": "21:40",
+        "lead": 0,
+        "intervalHours": 48,
+        "days": [],
+        "date": null,
+        "message": "Test",
+        "enabled": true
+      }
+    ]
+  }
+}
