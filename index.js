@@ -22,6 +22,13 @@ const fs = require('fs');
 const { randomUUID } = require('crypto');
 const schedule = require('node-schedule');
 
+// ===== KINGSHOT IMPORTS =====
+const storage = require('./utils/storage');
+const validation = require('./utils/validation');
+const GiftCodeManager = require('./services/giftCodeManager');
+const KingshotRedeemer = require('./services/kingshotRedeemer');
+const { DiscordGiftCodeSource } = require('./services/giftCodeSource');
+
 // ===== LOGGING =====
 // Timestamped console logger so activity can be traced from the terminal.
 function log(...args) {
@@ -31,6 +38,18 @@ function log(...args) {
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
 const CONFIG_FILE = './config.json';
+
+// ===== KINGSHOT SERVICES =====
+let giftCodeManager = new GiftCodeManager();
+let kingshotRedeemer = new KingshotRedeemer();
+let discordGiftCodeSource = null; // Initialized after client is ready
+let giftCodeScanJob = null;
+const KINGSHOT_CONFIG = {
+    enabled: true,
+    maxAccountsPerUser: 20,
+    giftCodeScanIntervalMinutes: 15,
+    notificationChannelId: null
+};
 
 // ===== CONFIG =====
 // Default to UTC; overridable per guild in config.json (any IANA timezone).
@@ -618,6 +637,74 @@ function getTodayList(guildId) {
     return { embeds: [embed] };
 }
 
+// ===== KINGSHOT SCANNER =====
+async function startGiftCodeScheduler() {
+    if (giftCodeScanJob) {
+        log("⚠️  Gift code scanner already running");
+        return;
+    }
+
+    if (!KINGSHOT_CONFIG.enabled) {
+        log("⏸️  Gift code scanner disabled");
+        return;
+    }
+
+    // Schedule the scan job
+    const rule = new schedule.RecurrenceRule();
+    rule.minute = new schedule.Range(0, 59, KINGSHOT_CONFIG.giftCodeScanIntervalMinutes);
+
+    giftCodeScanJob = schedule.scheduleJob(rule, async () => {
+        try {
+            log("🔎 Scanning for new Kingshot gift codes...");
+            
+            if (!discordGiftCodeSource) {
+                discordGiftCodeSource = new DiscordGiftCodeSource(client, { channels: [] });
+            }
+
+            const newCodes = await giftCodeManager.scanSources([discordGiftCodeSource]);
+
+            if (newCodes.length > 0) {
+                log(`🎁 Found ${newCodes.length} new gift code(s)`);
+                
+                // Optionally send notification to configured channel
+                if (KINGSHOT_CONFIG.notificationChannelId) {
+                    try {
+                        const channel = await client.channels.fetch(KINGSHOT_CONFIG.notificationChannelId);
+                        if (channel && channel.isTextBased()) {
+                            for (const codeData of newCodes) {
+                                const embed = new EmbedBuilder()
+                                    .setTitle('🎁 New Kingshot Gift Code Detected!')
+                                    .setColor(0x00FF00)
+                                    .addFields(
+                                        { name: 'Code', value: `\`${codeData.code}\``, inline: false },
+                                        { name: 'Source', value: codeData.source, inline: true }
+                                    )
+                                    .setTimestamp();
+                                
+                                await channel.send({ embeds: [embed] });
+                            }
+                        }
+                    } catch (err) {
+                        log(`⚠️  Failed to send gift code notification: ${err.message}`);
+                    }
+                }
+            }
+        } catch (err) {
+            log(`❌ Gift code scan error: ${err.message}`);
+        }
+    });
+
+    log(`🎁 Gift code scanner started (every ${KINGSHOT_CONFIG.giftCodeScanIntervalMinutes} minutes)`);
+}
+
+function stopGiftCodeScheduler() {
+    if (giftCodeScanJob) {
+        giftCodeScanJob.cancel();
+        giftCodeScanJob = null;
+        log("⏹️  Gift code scanner stopped");
+    }
+}
+
 // ===== INTERACTIONS =====
 client.on('interactionCreate', async interaction => {
     if (!interaction.guildId) return;
@@ -631,7 +718,275 @@ client.on('interactionCreate', async interaction => {
         return interaction.reply(getTodayList(interaction.guildId));
     }
 
-    // Permission gate: only members with Manage Server (or admins) may configure.
+    // ===== KINGSHOT COMMANDS (accessible to all users) =====
+    
+    // /register - Register a Kingshot account
+    if (interaction.isChatInputCommand() && interaction.commandName === 'register') {
+        const playerId = interaction.options.getString('player_id');
+        const kingdom = interaction.options.getString('kingdom');
+        const name = interaction.options.getString('name');
+
+        const playerIdValidation = validation.validatePlayerId(playerId);
+        if (!playerIdValidation.valid) {
+            return interaction.reply({ content: `❌ ${playerIdValidation.error}`, flags: MessageFlags.Ephemeral });
+        }
+
+        const kingdomValidation = validation.validateKingdom(kingdom);
+        if (!kingdomValidation.valid) {
+            return interaction.reply({ content: `❌ ${kingdomValidation.error}`, flags: MessageFlags.Ephemeral });
+        }
+
+        const nameValidation = validation.validateAccountName(name);
+        if (!nameValidation.valid) {
+            return interaction.reply({ content: `❌ ${nameValidation.error}`, flags: MessageFlags.Ephemeral });
+        }
+
+        const userId = interaction.user.id;
+        const accounts = storage.getUserAccounts(userId);
+
+        if (accounts.length >= KINGSHOT_CONFIG.maxAccountsPerUser) {
+            return interaction.reply({
+                content: `❌ You've reached the account limit (${KINGSHOT_CONFIG.maxAccountsPerUser}).`,
+                flags: MessageFlags.Ephemeral
+            });
+        }
+
+        // Check if this Player ID is already registered by this user
+        if (accounts.some(a => a.playerId === playerIdValidation.value)) {
+            return interaction.reply({
+                content: `❌ This Player ID is already registered to your account.`,
+                flags: MessageFlags.Ephemeral
+            });
+        }
+
+        // Check if this Player ID is registered to another user
+        const existing = storage.findAccountByPlayerId(playerIdValidation.value);
+        if (existing) {
+            return interaction.reply({
+                content: `❌ This Player ID is already associated with another Discord account. If this is your account, contact an administrator.`,
+                flags: MessageFlags.Ephemeral
+            });
+        }
+
+        const account = storage.addAccount(userId, playerIdValidation.value, kingdomValidation.value, nameValidation.value);
+
+        const embed = new EmbedBuilder()
+            .setTitle('✅ Account Registered')
+            .setColor(0x00FF00)
+            .addFields(
+                { name: 'Name', value: account.name || 'N/A', inline: true },
+                { name: 'Player ID', value: account.playerId, inline: true },
+                { name: 'Kingdom', value: account.kingdom, inline: true }
+            )
+            .setTimestamp();
+
+        return interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
+    }
+
+    // /accounts - List all registered accounts
+    if (interaction.isChatInputCommand() && interaction.commandName === 'accounts') {
+        const userId = interaction.user.id;
+        const accounts = storage.getUserAccounts(userId);
+
+        if (accounts.length === 0) {
+            return interaction.reply({
+                content: `🎮 You have no registered Kingshot accounts. Use \`/register\` to add one!`,
+                flags: MessageFlags.Ephemeral
+            });
+        }
+
+        const fields = accounts.map((acc, idx) => ({
+            name: `${idx + 1}. ${acc.name}`,
+            value: `Player ID: \`${acc.playerId}\`\nKingdom: \`${acc.kingdom}\`\nID: \`${acc.id}\``,
+            inline: false
+        }));
+
+        const embed = new EmbedBuilder()
+            .setTitle(`🎮 Your Kingshot Accounts`)
+            .setColor(0x5865F2)
+            .addFields(fields)
+            .setTimestamp();
+
+        return interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
+    }
+
+    // /remove-account - Remove an account
+    if (interaction.isChatInputCommand() && interaction.commandName === 'remove-account') {
+        const accountId = interaction.options.getString('account_id');
+        const userId = interaction.user.id;
+
+        const account = storage.findAccount(userId, accountId);
+        if (!account) {
+            return interaction.reply({
+                content: `❌ Account not found.`,
+                flags: MessageFlags.Ephemeral
+            });
+        }
+
+        storage.removeAccount(userId, accountId);
+
+        return interaction.reply({
+            content: `🗑️ Removed account **${account.name}** (Player ID: ${account.playerId})`,
+            flags: MessageFlags.Ephemeral
+        });
+    }
+
+    // /edit-account - Edit an account (shows a modal)
+    if (interaction.isChatInputCommand() && interaction.commandName === 'edit-account') {
+        const accountId = interaction.options.getString('account_id');
+        const userId = interaction.user.id;
+
+        const account = storage.findAccount(userId, accountId);
+        if (!account) {
+            return interaction.reply({
+                content: `❌ Account not found.`,
+                flags: MessageFlags.Ephemeral
+            });
+        }
+
+        const modal = new ModalBuilder()
+            .setCustomId(`kingshot_edit_account:${accountId}`)
+            .setTitle('Edit Account');
+        
+        modal.addComponents(
+            new ActionRowBuilder().addComponents(
+                new TextInputBuilder()
+                    .setCustomId('name')
+                    .setLabel('Account Name (optional)')
+                    .setStyle(TextInputStyle.Short)
+                    .setRequired(false)
+                    .setMaxLength(50)
+                    .setValue(account.name || '')
+            ),
+            new ActionRowBuilder().addComponents(
+                new TextInputBuilder()
+                    .setCustomId('player_id')
+                    .setLabel('Player ID')
+                    .setStyle(TextInputStyle.Short)
+                    .setRequired(true)
+                    .setValue(account.playerId)
+            ),
+            new ActionRowBuilder().addComponents(
+                new TextInputBuilder()
+                    .setCustomId('kingdom')
+                    .setLabel('Kingdom')
+                    .setStyle(TextInputStyle.Short)
+                    .setRequired(true)
+                    .setValue(account.kingdom)
+            )
+        );
+
+        return interaction.showModal(modal);
+    }
+
+    // /giftcodes - Show available gift codes
+    if (interaction.isChatInputCommand() && interaction.commandName === 'giftcodes') {
+        const codes = giftCodeManager.getAllCodes();
+        const codeList = Object.values(codes);
+
+        if (codeList.length === 0) {
+            return interaction.reply({
+                content: `🎁 No gift codes have been discovered yet.`,
+                flags: MessageFlags.Ephemeral
+            });
+        }
+
+        const fields = codeList.slice(0, 25).map(code => ({
+            name: code.code,
+            value: `Status: \`${code.status}\`\nFound: ${new Date(code.firstSeenAt).toLocaleDateString()}`,
+            inline: true
+        }));
+
+        const embed = new EmbedBuilder()
+            .setTitle(`🎁 Available Gift Codes`)
+            .setColor(0xFFD700)
+            .addFields(fields)
+            .setFooter({ text: `Total: ${codeList.length} code(s)` })
+            .setTimestamp();
+
+        return interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
+    }
+
+    // /redeem - Redeem a gift code for your accounts
+    if (interaction.isChatInputCommand() && interaction.commandName === 'redeem') {
+        const code = interaction.options.getString('code');
+        const userId = interaction.user.id;
+        const accounts = storage.getUserAccounts(userId);
+
+        if (accounts.length === 0) {
+            return interaction.reply({
+                content: `❌ You have no registered Kingshot accounts. Use \`/register\` first!`,
+                flags: MessageFlags.Ephemeral
+            });
+        }
+
+        const codeValidation = validation.validateGiftCode(code);
+        if (!codeValidation.valid) {
+            return interaction.reply({
+                content: `❌ ${codeValidation.error}`,
+                flags: MessageFlags.Ephemeral
+            });
+        }
+
+        const codeData = giftCodeManager.getCodeStatus(codeValidation.value);
+        if (!codeData) {
+            return interaction.reply({
+                content: `❌ This code doesn't exist in our database yet.`,
+                flags: MessageFlags.Ephemeral
+            });
+        }
+
+        // Create a selection menu to choose accounts
+        const options = accounts.map(acc => ({
+            label: acc.name,
+            value: acc.id,
+            description: `ID: ${acc.playerId} | Kingdom: ${acc.kingdom}`
+        }));
+
+        const selectMenu = new StringSelectMenuBuilder()
+            .setCustomId(`kingshot_redeem_select:${codeValidation.value}`)
+            .setPlaceholder('Select accounts to redeem on...')
+            .setMinValues(1)
+            .setMaxValues(Math.min(accounts.length, 25))
+            .addOptions(options);
+
+        const row = new ActionRowBuilder().addComponents(selectMenu);
+
+        return interaction.reply({
+            content: `🎁 Select which accounts to redeem **\`${codeValidation.value}\`** on:`,
+            components: [row],
+            flags: MessageFlags.Ephemeral
+        });
+    }
+
+    // /giftcode-status - Admin command to see scanner status
+    if (interaction.isChatInputCommand() && interaction.commandName === 'giftcode-status') {
+        if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
+            return interaction.reply({
+                content: '❌ You need the **Manage Server** permission to use this command.',
+                flags: MessageFlags.Ephemeral
+            });
+        }
+
+        const stats = giftCodeManager.getStats();
+        const embed = new EmbedBuilder()
+            .setTitle('🎁 Gift Code Scanner Status')
+            .setColor(0x5865F2)
+            .addFields(
+                { name: 'Last Scan', value: stats.lastScanTime ? new Date(stats.lastScanTime).toLocaleString() : 'Never', inline: true },
+                { name: 'Scan Count', value: String(stats.scanCount), inline: true },
+                { name: 'Codes Found', value: String(stats.totalCodesFound), inline: true },
+                { name: 'Total Unique Codes', value: String(stats.totalUniqueCodesInDb), inline: true },
+                { name: 'New Codes', value: String(stats.newCodes), inline: true },
+                { name: 'Active Codes', value: String(stats.activeCodes), inline: true }
+            )
+            .setFooter({ text: stats.lastError || 'No errors' })
+            .setTimestamp();
+
+        return interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
+    }
+
+    // Permission gate: only members with Manage Server (or admins) may configure events.
     if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
         if (interaction.isRepliable()) {
             return interaction.reply({
@@ -767,6 +1122,63 @@ client.on('interactionCreate', async interaction => {
         if (interaction.isStringSelectMenu()) {
             const id = interaction.customId;
 
+            // Kingshot: Redeem on selected accounts
+            if (id.startsWith('kingshot_redeem_select:')) {
+                const code = id.split(':')[1];
+                const userId = interaction.user.id;
+                const selectedAccountIds = interaction.values;
+
+                const allAccounts = storage.getUserAccounts(userId);
+                const selectedAccounts = allAccounts.filter(a => selectedAccountIds.includes(a.id));
+
+                if (selectedAccounts.length === 0) {
+                    return interaction.reply({
+                        content: `❌ No valid accounts selected.`,
+                        flags: MessageFlags.Ephemeral
+                    });
+                }
+
+                // Process redemptions
+                const results = [];
+                for (const account of selectedAccounts) {
+                    const result = await kingshotRedeemer.redeemCode(code, account.playerId, account.kingdom);
+                    results.push({
+                        name: account.name,
+                        playerId: account.playerId,
+                        kingdom: account.kingdom,
+                        result
+                    });
+                }
+
+                // Format results
+                const fields = results.map(r => {
+                    const statusEmoji = {
+                        'success': '✅',
+                        'already_redeemed': '⚠️',
+                        'invalid_code': '❌',
+                        'expired': '⏳',
+                        'captcha_required': '🔐',
+                        'rate_limited': '⏱️',
+                        'network_error': '🌐',
+                        'unknown_error': '❓'
+                    }[r.result.status] || '❓';
+
+                    return {
+                        name: `${statusEmoji} ${r.name}`,
+                        value: r.result.message || 'No message',
+                        inline: false
+                    };
+                });
+
+                const embed = new EmbedBuilder()
+                    .setTitle(`🎁 Redeem Results for \`${code}\``)
+                    .setColor(0x5865F2)
+                    .addFields(fields)
+                    .setTimestamp();
+
+                return interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
+            }
+
             if (id === 'evt_edit_select') {
                 const ev = findEvent(config, interaction.values[0]);
                 if (!ev) return interaction.update({ content: '⚠️ That event no longer exists.', components: [] });
@@ -813,6 +1225,76 @@ client.on('interactionCreate', async interaction => {
         // ----- Modal submits -----
         if (interaction.isModalSubmit()) {
             const id = interaction.customId;
+
+            // Kingshot: Edit Account Modal
+            if (id.startsWith('kingshot_edit_account:')) {
+                const accountId = id.split(':')[1];
+                const userId = interaction.user.id;
+
+                const name = interaction.fields.getTextInputValue('name').trim() || null;
+                const playerId = interaction.fields.getTextInputValue('player_id').trim();
+                const kingdom = interaction.fields.getTextInputValue('kingdom').trim();
+
+                const playerIdValidation = validation.validatePlayerId(playerId);
+                if (!playerIdValidation.valid) {
+                    return interaction.reply({ content: `❌ ${playerIdValidation.error}`, flags: MessageFlags.Ephemeral });
+                }
+
+                const kingdomValidation = validation.validateKingdom(kingdom);
+                if (!kingdomValidation.valid) {
+                    return interaction.reply({ content: `❌ ${kingdomValidation.error}`, flags: MessageFlags.Ephemeral });
+                }
+
+                const nameValidation = validation.validateAccountName(name);
+                if (!nameValidation.valid) {
+                    return interaction.reply({ content: `❌ ${nameValidation.error}`, flags: MessageFlags.Ephemeral });
+                }
+
+                const account = storage.findAccount(userId, accountId);
+                if (!account) {
+                    return interaction.reply({
+                        content: `❌ Account not found.`,
+                        flags: MessageFlags.Ephemeral
+                    });
+                }
+
+                // Check if new Player ID is already in use by this user or another user
+                if (playerIdValidation.value !== account.playerId) {
+                    const accounts = storage.getUserAccounts(userId);
+                    if (accounts.some(a => a.playerId === playerIdValidation.value)) {
+                        return interaction.reply({
+                            content: `❌ This Player ID is already registered to your account.`,
+                            flags: MessageFlags.Ephemeral
+                        });
+                    }
+
+                    const existing = storage.findAccountByPlayerId(playerIdValidation.value);
+                    if (existing) {
+                        return interaction.reply({
+                            content: `❌ This Player ID is already associated with another Discord account.`,
+                            flags: MessageFlags.Ephemeral
+                        });
+                    }
+                }
+
+                storage.updateAccount(userId, accountId, {
+                    name: nameValidation.value || account.name,
+                    playerId: playerIdValidation.value,
+                    kingdom: kingdomValidation.value
+                });
+
+                const embed = new EmbedBuilder()
+                    .setTitle('✅ Account Updated')
+                    .setColor(0x00FF00)
+                    .addFields(
+                        { name: 'Name', value: nameValidation.value || account.name, inline: true },
+                        { name: 'Player ID', value: playerIdValidation.value, inline: true },
+                        { name: 'Kingdom', value: kingdomValidation.value, inline: true }
+                    )
+                    .setTimestamp();
+
+                return interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
+            }
 
             if (id === 'evt_addmodal') {
                 const name = interaction.fields.getTextInputValue('name').trim();
@@ -872,9 +1354,42 @@ client.once(Events.ClientReady, () => {
 
     client.application.commands.set([
         { name: "config", description: "Open panel" },
-        { name: "today", description: "Show today's and tomorrow's reminders (UTC)" }
+        { name: "today", description: "Show today's and tomorrow's reminders (UTC)" },
+        {
+            name: "register",
+            description: "Register a Kingshot account",
+            options: [
+                { name: "player_id", type: 3, description: "Kingshot Player ID", required: true },
+                { name: "kingdom", type: 3, description: "Kingdom number", required: true },
+                { name: "name", type: 3, description: "Account name (optional)", required: false }
+            ]
+        },
+        { name: "accounts", description: "List your registered Kingshot accounts" },
+        {
+            name: "remove-account",
+            description: "Remove a Kingshot account",
+            options: [
+                { name: "account_id", type: 3, description: "Account ID to remove", required: true }
+            ]
+        },
+        {
+            name: "edit-account",
+            description: "Edit a Kingshot account",
+            options: [
+                { name: "account_id", type: 3, description: "Account ID to edit", required: true }
+            ]
+        },
+        { name: "giftcodes", description: "View discovered Kingshot gift codes" },
+        {
+            name: "redeem",
+            description: "Redeem a gift code on your accounts",
+            options: [
+                { name: "code", type: 3, description: "The gift code to redeem", required: true }
+            ]
+        },
+        { name: "giftcode-status", description: "View gift code scanner status (admin only)" }
     ])
-        .then(() => log("🔧 Registered global /config command"))
+        .then(() => log("🔧 Registered global commands"))
         .catch(err => log("❌ Failed to register commands:", err));
 
     const allConfig = loadConfig();
@@ -885,6 +1400,11 @@ client.once(Events.ClientReady, () => {
         saveGuildConfig(guildId, config); // persist any migration to the new shape
         scheduleJobs(guildId, config);
     }
+
+    // Initialize Kingshot services
+    storage.ensureDataDir();
+    discordGiftCodeSource = new DiscordGiftCodeSource(client, { channels: [] });
+    startGiftCodeScheduler();
 });
 
 // Bot added/re-added to a server while running: resume reminders from saved config.
@@ -906,6 +1426,14 @@ client.on(Events.GuildDelete, guild => {
 
 client.on('error', err => log("❌ client error:", err));
 client.on('warn', msg => log("⚠️  client warn:", msg));
+
+// Graceful shutdown
+process.on('SIGINT', () => {
+    log("🛑 Shutting down...");
+    stopGiftCodeScheduler();
+    client.destroy();
+    process.exit(0);
+});
 
 // ===== TOKEN =====
 if (!process.env.DC_TOKEN) {

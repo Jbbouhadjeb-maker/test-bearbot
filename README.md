@@ -117,6 +117,102 @@ On success you should see logs like:
 
 ---
 
+## 🎮 Kingshot Account Management & Gift Codes
+
+The bot includes a **multi-account Kingshot system** that allows each Discord user to register multiple Kingshot accounts and manage gift code redemptions.
+
+### Features
+
+- **Register multiple Kingshot accounts** — each with a unique Player ID, Kingdom, and optional name
+- **Manage accounts** — view, edit, or delete your registered accounts
+- **Automatic gift code detection** — the bot scans Discord channels for new gift codes
+- **Gift code tracking** — see all discovered codes and their status
+- **Redemption tracking** — record which codes have been used on which accounts
+
+### Commands
+
+#### User Commands (open to everyone)
+
+- **`/register`** — register a new Kingshot account
+  - `player_id`: Your Kingshot Player ID (numbers only)
+  - `kingdom`: Your Kingdom number
+  - `name`: Optional account nickname (e.g., "Main" or "Farm 1")
+  - Example: `/register player_id:123456789 kingdom:1234 name:Main`
+
+- **`/accounts`** — list all your registered Kingshot accounts
+
+- **`/edit-account`** — edit an existing account (name, Player ID, or Kingdom)
+  - `account_id`: The ID of the account to edit (shown in `/accounts`)
+
+- **`/remove-account`** — delete a registered account
+  - `account_id`: The ID of the account to remove
+
+- **`/giftcodes`** — view all discovered gift codes and their status
+
+- **`/redeem`** — redeem a gift code on your accounts
+  - `code`: The gift code to redeem
+  - Select which accounts to redeem on from the menu
+
+#### Admin Commands
+
+- **`/giftcode-status`** — view scanner statistics (requires **Manage Server** permission)
+  - Shows: last scan time, total codes found, new codes, active codes, errors
+
+### Configuration
+
+The scanner is enabled by default and runs every **15 minutes** (configurable).
+Discovered codes are stored in `data/giftcodes.json`.
+
+### Limitations & Important Notes
+
+- **Automatic redemption** has limitations due to security on the Kingshot redemption site. If a CAPTCHA is encountered, you may need to manually redeem through the official site: https://ks-giftcode.centurygame.com
+- **Player ID validation**: Player IDs must be numeric only, without special characters
+- **Account limits**: Each Discord user can register up to 20 Kingshot accounts
+- **Passwords are never stored**: The system only stores Player ID and Kingdom; it never asks for or stores your Kingshot password
+- **One Player ID per user**: Each Kingshot Player ID can only be registered to one Discord account. Attempting to register an already-used Player ID will be rejected
+- **Data persistence**: All accounts and codes are stored in JSON files in the `data/` folder, which survives bot restarts
+
+### Data Storage
+
+Player accounts are stored in `data/players.json`:
+```json
+{
+  "DISCORD_USER_ID": {
+    "accounts": [
+      {
+        "id": "uuid",
+        "name": "Main",
+        "playerId": "123456789",
+        "kingdom": "1234",
+        "createdAt": "...",
+        "updatedAt": "..."
+      }
+    ]
+  }
+}
+```
+
+Gift codes are stored in `data/giftcodes.json`:
+```json
+{
+  "CODE123": {
+    "code": "CODE123",
+    "firstSeenAt": "...",
+    "lastSeenAt": "...",
+    "source": "discord",
+    "status": "new",
+    "redeemResults": {
+      "PLAYER_ID_KINGDOM": {
+        "status": "success",
+        "timestamp": "..."
+      }
+    }
+  }
+}
+```
+
+---
+
 ## 🛠️ Troubleshooting
 
 - **Bot stays offline / "Login failed":** wrong or empty `DC_TOKEN` in `.env`.
@@ -129,3 +225,5 @@ On success you should see logs like:
 - **Missing modules:** run `npm install` again.
 - **"❌ You need the Manage Server permission":** `/config` is restricted to
   members with **Manage Server**; ask a server admin to grant it.
+- **Can't register account:** Your Player ID might already be registered to another Discord account, or you've reached the 20-account limit.
+
