@@ -28,6 +28,7 @@ const validation = require('./utils/validation');
 const GiftCodeManager = require('./services/giftCodeManager');
 const KingshotRedeemer = require('./services/kingshotRedeemer');
 const { DiscordGiftCodeSource } = require('./services/giftCodeSource');
+const KingshotWebsiteSource = require('./services/kingshot-website-source');
 
 // ===== LOGGING =====
 // Timestamped console logger so activity can be traced from the terminal.
@@ -43,6 +44,7 @@ const CONFIG_FILE = './config.json';
 let giftCodeManager = new GiftCodeManager();
 let kingshotRedeemer = new KingshotRedeemer();
 let discordGiftCodeSource = null; // Initialized after client is ready
+let kingshotWebsiteSource = null; // Initialized after client is ready
 let giftCodeScanJob = null;
 const KINGSHOT_CONFIG = {
     enabled: true,
@@ -649,6 +651,14 @@ async function startGiftCodeScheduler() {
         return;
     }
 
+    // Initialize sources if not already done
+    if (!discordGiftCodeSource) {
+        discordGiftCodeSource = new DiscordGiftCodeSource(client, { channels: [] });
+    }
+    if (!kingshotWebsiteSource) {
+        kingshotWebsiteSource = new KingshotWebsiteSource();
+    }
+
     // Schedule the scan job
     const rule = new schedule.RecurrenceRule();
     rule.minute = new schedule.Range(0, 59, KINGSHOT_CONFIG.giftCodeScanIntervalMinutes);
@@ -657,11 +667,11 @@ async function startGiftCodeScheduler() {
         try {
             log("🔎 Scanning for new Kingshot gift codes...");
             
-            if (!discordGiftCodeSource) {
-                discordGiftCodeSource = new DiscordGiftCodeSource(client, { channels: [] });
-            }
-
-            const newCodes = await giftCodeManager.scanSources([discordGiftCodeSource]);
+            // Scan both sources: Discord and Kingshot Website
+            const newCodes = await giftCodeManager.scanSources([
+                kingshotWebsiteSource,
+                discordGiftCodeSource
+            ]);
 
             if (newCodes.length > 0) {
                 log(`🎁 Found ${newCodes.length} new gift code(s)`);
@@ -693,6 +703,20 @@ async function startGiftCodeScheduler() {
             log(`❌ Gift code scan error: ${err.message}`);
         }
     });
+
+    // Run the scan immediately on startup
+    try {
+        log("🔎 Running initial gift code scan...");
+        const initialCodes = await giftCodeManager.scanSources([
+            kingshotWebsiteSource,
+            discordGiftCodeSource
+        ]);
+        if (initialCodes.length > 0) {
+            log(`🎁 Initial scan found ${initialCodes.length} gift code(s)`);
+        }
+    } catch (err) {
+        log(`⚠️  Initial scan error: ${err.message}`);
+    }
 
     log(`🎁 Gift code scanner started (every ${KINGSHOT_CONFIG.giftCodeScanIntervalMinutes} minutes)`);
 }
@@ -1404,6 +1428,7 @@ client.once(Events.ClientReady, () => {
     // Initialize Kingshot services
     storage.ensureDataDir();
     discordGiftCodeSource = new DiscordGiftCodeSource(client, { channels: [] });
+    kingshotWebsiteSource = new KingshotWebsiteSource();
     startGiftCodeScheduler();
 });
 
