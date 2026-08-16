@@ -1373,7 +1373,7 @@ client.on('interactionCreate', async interaction => {
 });
 
 // ===== READY =====
-client.once(Events.ClientReady, () => {
+client.once(Events.ClientReady, async () => {
     log(`✅ Logged in as ${client.user.tag}`);
 
     client.application.commands.set([
@@ -1429,6 +1429,15 @@ client.once(Events.ClientReady, () => {
     storage.ensureDataDir();
     discordGiftCodeSource = new DiscordGiftCodeSource(client, { channels: [] });
     kingshotWebsiteSource = new KingshotWebsiteSource();
+    
+    // Initialize Puppeteer-based auto-redeemer
+    try {
+        await kingshotRedeemer.initialize();
+        log("✅ Kingshot auto-redeemer initialized with Puppeteer");
+    } catch (error) {
+        log("⚠️  Kingshot auto-redeemer initialization failed:", error.message);
+    }
+    
     startGiftCodeScheduler();
 });
 
@@ -1453,9 +1462,18 @@ client.on('error', err => log("❌ client error:", err));
 client.on('warn', msg => log("⚠️  client warn:", msg));
 
 // Graceful shutdown
-process.on('SIGINT', () => {
+process.on('SIGINT', async () => {
     log("🛑 Shutting down...");
     stopGiftCodeScheduler();
+    
+    // Shutdown Puppeteer browser
+    try {
+        await kingshotRedeemer.shutdown();
+        log("✅ Kingshot auto-redeemer shutdown complete");
+    } catch (error) {
+        log("⚠️  Error shutting down auto-redeemer:", error.message);
+    }
+    
     client.destroy();
     process.exit(0);
 });

@@ -1,42 +1,51 @@
 const storage = require('../utils/storage');
+const KingshotAutoRedeem = require('./kingshot-auto-redeem');
 
 /**
- * Kingshot Redeemer
- * 
- * IMPORTANT: This module does NOT attempt to:
- * - Bypass CAPTCHA
- * - Bypass rate limiting
- * - Circumvent authentication
- * - Use stolen credentials
- * 
- * The redemption site (https://ks-giftcode.centurygame.com) likely has
- * protections against automated redemption. This module provides:
- * 
- * 1. A standard interface for recording redemption attempts
- * 2. Tracking of code usage per account
- * 3. Detection of already-redeemed codes
- * 4. Rate limiting to prevent abuse
- * 
- * Actual redemption automation would require:
- * - An official Kingshot API
- * - Explicit permission from Kingshot
- * - Or manual redemption by the player through the official website
+ * Kingshot Gift Code Redeemer
+ * Handles automatic gift code redemption using Puppeteer
+ * Simulates real user interactions to bypass CAPTCHA
  */
-
 class KingshotRedeemer {
     constructor() {
+        this.autoRedeem = new KingshotAutoRedeem();
         this.config = {
-            maxRedemptionsPerSecond: 0.2, // One redemption per 5 seconds
+            maxRedemptionsPerSecond: 0.5, // One redemption per 2 seconds
             timeout: 30000, // 30 second timeout for HTTP requests
-            maxRetries: 2
+            maxRetries: 1
         };
         this.lastRedemptionTime = 0;
         this.stats = {
             totalAttempts: 0,
             successCount: 0,
             failureCount: 0,
-            skippedCount: 0
+            skippedCount: 0,
+            captchaCount: 0
         };
+    }
+
+    /**
+     * Initialize auto-redeemer
+     */
+    async initialize() {
+        try {
+            await this.autoRedeem.initialize();
+            console.log('[KingshotRedeemer] Auto-redeem initialized');
+        } catch (error) {
+            console.error('[KingshotRedeemer] Failed to initialize:', error.message);
+        }
+    }
+
+    /**
+     * Shutdown auto-redeemer
+     */
+    async shutdown() {
+        try {
+            await this.autoRedeem.shutdown();
+            console.log('[KingshotRedeemer] Auto-redeem shutdown');
+        } catch (error) {
+            console.error('[KingshotRedeemer] Error during shutdown:', error.message);
+        }
     }
 
     /**
@@ -71,23 +80,11 @@ class KingshotRedeemer {
     }
 
     /**
-     * Simulate/record a redemption attempt
-     * 
-     * In a real scenario with an official API, this would make an HTTP request.
-     * Currently, this is a placeholder that demonstrates the structure.
-     * 
-     * Returns: { status, message }
-     * Possible statuses:
-     * - success
-     * - already_redeemed
-     * - invalid_code
-     * - expired
-     * - wrong_kingdom
-     * - player_not_found
-     * - captcha_required
-     * - rate_limited
-     * - network_error
-     * - unknown_error
+     * Redeem a gift code using Puppeteer automation
+     * @param {string} code - Gift code to redeem
+     * @param {string} playerId - Player ID
+     * @param {string} kingdom - Kingdom ID
+     * @returns {Promise<{status: string, message: string}>}
      */
     async redeemCode(code, playerId, kingdom) {
         this.stats.totalAttempts++;
@@ -98,11 +95,13 @@ class KingshotRedeemer {
         const requiredDelay = 1 / this.config.maxRedemptionsPerSecond;
         
         if (elapsed < requiredDelay) {
+            const waitTime = Math.ceil(requiredDelay - elapsed);
             const result = {
                 status: 'rate_limited',
-                message: `Please wait ${Math.ceil(requiredDelay - elapsed)} seconds before the next redemption.`
+                message: `Rate limited. Please wait ${waitTime}s before next redemption.`
             };
             this.stats.skippedCount++;
+            storage.recordRedeemAttempt(code, playerId, kingdom, result);
             return result;
         }
 
@@ -114,27 +113,48 @@ class KingshotRedeemer {
                 message: history.message || 'This code has already been used on this account.'
             };
             this.stats.skippedCount++;
-            storage.recordRedeemAttempt(code, playerId, kingdom, result);
             return result;
         }
 
-        // TODO: Implement actual redemption here
-        // This would require:
-        // 1. An official Kingshot API with proper authentication
-        // 2. Or a documented redemption endpoint
-        // 3. Or acceptance of manual redemption only
-        
-        // For now, return a message indicating automation is not yet implemented
-        const result = {
-            status: 'captcha_required',
-            message: 'Automatic redemption requires visiting the official Kingshot redemption site. This is a security limitation of the website.'
-        };
+        try {
+            console.log(`[KingshotRedeemer] Attempting to redeem ${code} for player ${playerId}`);
+            
+            // Use Puppeteer to redeem automatically
+            const result = await this.autoRedeem.redeemCode(code, playerId, kingdom);
+            
+            // Update stats based on result
+            if (result.status === 'success') {
+                this.stats.successCount++;
+            } else if (result.status === 'captcha_unsolvable' || result.status === 'captcha_required') {
+                this.stats.captchaCount++;
+            } else if (result.status === 'error' || result.status === 'network_error') {
+                this.stats.failureCount++;
+            } else {
+                this.stats.failureCount++;
+            }
 
-        this.lastRedemptionTime = now;
-        this.stats.failureCount++;
-        
-        storage.recordRedeemAttempt(code, playerId, kingdom, result);
-        return result;
+            this.lastRedemptionTime = now;
+            
+            // Record the attempt in storage
+            storage.recordRedeemAttempt(code, playerId, kingdom, result);
+            
+            return result;
+
+        } catch (error) {
+            console.error(`[KingshotRedeemer] Error redeeming ${code}:`, error.message);
+            
+            const result = {
+                status: 'error',
+                message: `Redemption error: ${error.message}`
+            };
+            
+            this.stats.failureCount++;
+            this.lastRedemptionTime = now;
+            
+            storage.recordRedeemAttempt(code, playerId, kingdom, result);
+            
+            return result;
+        }
     }
 
     /**
@@ -150,8 +170,8 @@ class KingshotRedeemer {
                 result
             });
             
-            // Small delay between redemptions to be respectful
-            await new Promise(resolve => setTimeout(resolve, 100));
+            // Delay between redemptions
+            await new Promise(resolve => setTimeout(resolve, 2000));
         }
         
         return results;
@@ -172,7 +192,8 @@ class KingshotRedeemer {
             totalAttempts: 0,
             successCount: 0,
             failureCount: 0,
-            skippedCount: 0
+            skippedCount: 0,
+            captchaCount: 0
         };
     }
 }
