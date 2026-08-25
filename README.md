@@ -227,3 +227,19 @@ Gift codes are stored in `data/giftcodes.json`:
   members with **Manage Server**; ask a server admin to grant it.
 - **Can't register account:** Your Player ID might already be registered to another Discord account, or you've reached the 20-account limit.
 
+
+## Scaling to 1,000 Discord servers
+
+The current JSON files are suitable for a small deployment, but they are not a safe long-term source of truth when many servers and users update data at the same time. Each request reads and rewrites the complete file, so multiple bot instances can overwrite each other's changes and create data desynchronization.
+
+Before targeting 1,000 servers, the production structure should include:
+
+- A real database such as PostgreSQL.
+- Transactions or optimistic locking for concurrent updates.
+- Distributed locks or a dedicated job queue for reminders.
+- A controlled redemption queue for Kingshot requests.
+- Stateless bot instances with persistent state in the database.
+- Monitoring and load tests for memory, CPU, Discord API limits, database latency, and restart recovery.
+
+One process may handle around 1,000 lightly active servers, but this must be confirmed with a realistic load test. Database migration and concurrency controls should be completed before running multiple bot instances.
+
